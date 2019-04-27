@@ -3,6 +3,9 @@ import matplotlib.pyplot as plt
 
 from numpy.fft import fft2, ifft2, fftshift, ifftshift
 
+import arrayfire as af
+
+
 from IPython import display
 import time
 import pickle
@@ -61,6 +64,20 @@ def image_registration(img_stack,usfac, img_up):
     return xshift, yshift
 
 
+def af_pad(image, NN, MM, val):
+    N,M = image.shape
+    Np = N + 2*NN
+    Mp = M + 2*MM
+    if image.dtype() == af.Dtype.f32 or image.dtype() == af.Dtype.f64:
+        image_pad = af.constant(val,Np,Mp)
+    else:
+        image_pad = af.constant(val*(1+1j*0),Np,Mp)
+    image_pad[NN:NN+N,MM:MM+M] = image
+    
+    return image_pad
+
+
+
 class cSIM_solver:
     
     def __init__(self, Ic_image_up, xshift, yshift, N_bound_pad, lambda_c, pscrop, z_camera, upsamp_factor, NA_obj, NAs, Gaussian_width, itr):
@@ -97,33 +114,40 @@ class cSIM_solver:
         fyp = np.r_[-Npp/2:Npp/2]/self.ps/Npp
 
         fxxp, fyyp = np.meshgrid(fxp,fyp)
-
-        self.fxxp = ifftshift(fxxp)
-        self.fyyp = ifftshift(fyyp)
+        
+        fxxp = ifftshift(fxxp)
+        fyyp = ifftshift(fyyp)
+        
+        self.fxxp = af.interop.np_to_af_array(fxxp)
+        self.fyyp = af.interop.np_to_af_array(fyyp)
 
         
         # Initialization of object and pattern
         self.obj = np.ones((self.Nc, self.Mc))
+        self.obj = af.interop.np_to_af_array(self.obj)
         self.field_p_whole = np.ones((Npp, Mpp))
+        
         
         for i in range(0, self.Nimg):
             field_p_shift_back = np.maximum(0,np.real(ifft2(fft2(np.pad(np.pad((Ic_image_up[0,i])**(1/2),(self.N_bound_pad,),mode='constant'),((self.yshift_max,),(self.xshift_max,)), mode='constant'))\
-            * np.exp(-1j*2*np.pi*self.ps*(self.fxxp * self.xshift[0,i] + self.fyyp * self.yshift[0,i])))))
+            * np.exp(-1j*2*np.pi*self.ps*(fxxp * self.xshift[0,i] + fyyp * self.yshift[0,i])))))
             self.field_p_whole += field_p_shift_back/self.Nimg
+            
+        self.field_p_whole = af.interop.np_to_af_array(self.field_p_whole)
         
         # Compute transfer function
         Pupil_obj = np.zeros((self.Nc,self.Mc))
         frc = (fxx_c**2 + fyy_c**2)**(1/2)
         Pupil_obj[frc<NA_obj/lambda_c] = 1
         Pupil_prop_sup = Pupil_obj.copy()
-        self.Pupil_obj = Pupil_obj.copy()
+        self.Pupil_obj = af.interop.np_to_af_array(Pupil_obj)
         
         Hz_det = np.zeros((self.N_defocus, self.Nc, self.Mc),complex)
 
         for i in range(0, self.N_defocus):
             Hz_det[i] = Pupil_prop_sup * np.exp(1j*2*np.pi/lambda_c*z_camera[i]*\
                                                 (1-lambda_c**2 * frc**2 *Pupil_prop_sup)**(1/2))
-        self.Hz_det = Hz_det.copy()
+        self.Hz_det = af.interop.np_to_af_array(Hz_det)
         
         # Set up Zernike polynomials
         
@@ -142,16 +166,20 @@ class cSIM_solver:
             temp = zernfun(n_idx[i],m_idx[i],rr[idx],theta_theta[idx])
             z[idx] = temp.ravel()
             self.zerpoly[i] = z/np.max(z)
+            
+        self.zerpoly = af.interop.np_to_af_array(self.zerpoly)
         
         # Compute support function
         self.Pattern_support = np.zeros((Npp,Mpp))
-        frp = (self.fxxp**2 + self.fyyp**2)**(1/2)
+        frp = (fxxp**2 + fyyp**2)**(1/2)
         self.Pattern_support[frp<NAs/lambda_c] = 1
+        self.Pattern_support = af.interop.np_to_af_array(self.Pattern_support)
 
         self.Object_support = np.zeros((self.Nc,self.Mc))
         self.Object_support[frc<(NA_obj+NAs)/lambda_c] = 1
         self.Gaussian = np.exp(-frc**2/(2*((NA_obj + NAs)*Gaussian_width/lambda_c)**2))
         self.Gaussian = (self.Gaussian/np.max(self.Gaussian)).copy()
+        self.Gaussian = af.interop.np_to_af_array(self.Gaussian)
         
         
         # iteration error
@@ -159,7 +187,15 @@ class cSIM_solver:
     
     def iterative_algorithm(self, Ic_image_up, update_shift=1, shift_alpha=1, update_Pupil=0, Pupil_alpha=1, figsize=(10,10)):
         f1,ax = plt.subplots(2,2,figsize=figsize)
-
+        
+        F = lambda x: af.signal.fft2(x)
+        iF = lambda x: af.signal.ifft2(x)
+        pad = lambda x, pad_y, pad_x: af_pad(x, pad_y, pad_x, 0)
+        max = lambda x: af.algorithm.max(af.arith.real(x), dim=None)
+        sum = lambda x: af.algorithm.sum(af.algorithm.sum(x, 0), 1)
+        angle = lambda x: af.arith.atan2(af.arith.imag(x), af.arith.real(x))
+        reshape =  lambda x, N: af.transpose(af.moddims(af.transpose(x), N[1], N[0]))
+        
         tic_time = time.time()
         print('|  Iter  |  error  |  Elapsed time (sec)  |')
 
@@ -169,70 +205,75 @@ class cSIM_solver:
             for j in range(0,self.Nimg):
                 for m in range(0,self.N_defocus):
                 
-                    fieldp_shift = ifft2(fft2(self.field_p_whole) * \
-                                          np.exp(1j*2*np.pi*self.ps*(self.fxxp * self.xshift[m,j] + self.fyyp * self.yshift[m,j])))
+                    fieldp_shift = iF(F(self.field_p_whole) * \
+                                          af.arith.exp(1j*2*np.pi*self.ps*(self.fxxp * self.xshift[m,j] + self.fyyp * self.yshift[m,j])))
                     field_p = fieldp_shift[self.yshift_max:self.Nc+self.yshift_max, \
                                            self.xshift_max:self.Mc+self.xshift_max]
-                    Ic_image_current_sqrt = (Ic_image_up[m,j])**(1/2)
+                    Ic_image_current_sqrt = af.interop.np_to_af_array((Ic_image_up[m,j])**(1/2))
                     
-                    field_f = fft2(field_p * self.obj)
-                    field_est = ifft2(self.Hz_det[m] * self.Pupil_obj * field_f)
-                    field_est_crop_abs = np.abs(field_est[self.N_bound_pad:self.N_bound_pad+self.N,\
+                    Hz_prop = reshape(self.Hz_det[m],(self.Hz_det.shape[1],self.Hz_det.shape[2]))
+                    
+                    field_f = F(field_p * self.obj)
+                    field_est = iF(Hz_prop * self.Pupil_obj * field_f)
+                    field_est_crop_abs = af.arith.abs(field_est[self.N_bound_pad:self.N_bound_pad+self.N,\
                                                           self.N_bound_pad:self.N_bound_pad+self.M])
                     I_sqrt_diff = Ic_image_current_sqrt - field_est_crop_abs
-                    residual = fft2(field_est/(np.abs(field_est)+1e-4) *\
-                                    np.pad(I_sqrt_diff, (self.N_bound_pad,), mode='constant'))
-                    field_temp = ifft2(np.conj(self.Pupil_obj * self.Hz_det[m]) * residual)
+                    residual = F(field_est/(af.arith.abs(field_est)+1e-4) *\
+                                    pad(I_sqrt_diff, self.N_bound_pad, self.N_bound_pad))
+                    field_temp = iF(af.arith.conjg(self.Pupil_obj * Hz_prop) * residual)
                     
                     # gradient computation
                     
-                    grad_obj = -np.conj(field_p) * field_temp
-                    grad_fieldp = -ifft2(fft2(np.pad(np.conj(self.obj)*field_temp, \
-                                                    ((self.yshift_max,),(self.xshift_max,)), mode='constant')) *\
-                                        np.exp(-1j*2*np.pi*self.ps*(self.fxxp * self.xshift[m,j] + \
+                    grad_obj = -af.arith.conjg(field_p) * field_temp
+                    grad_fieldp = -iF(F(pad(af.arith.conjg(self.obj)*field_temp, \
+                                                    self.yshift_max, self.xshift_max)) *\
+                                        af.arith.exp(-1j*2*np.pi*self.ps*(self.fxxp * self.xshift[m,j] + \
                                                                     self.fyyp * self.yshift[m,j])))
                     
                     if update_Pupil ==1:
-                        grad_Pupil = -np.conj(self.Hz_det[m]*field_f)*residual
+                        grad_Pupil = -af.arith.conjg(Hz_prop*field_f)*residual
 
                     # updating equation
-                    self.obj = (self.obj - grad_obj/(np.max(np.abs(field_p))**2)).copy()
-                    self.field_p_whole = (self.field_p_whole - grad_fieldp/(np.max(np.abs(self.obj))**2)).copy()
+                    self.obj = (self.obj - grad_obj/(max(af.arith.abs(field_p))**2)).copy()
+                    self.field_p_whole = (self.field_p_whole - grad_fieldp/(max(af.arith.abs(self.obj))**2)).copy()
 
                     if update_Pupil ==1:
-                        self.Pupil_obj = (self.Pupil_obj - grad_Pupil/np.max(abs(field_f)) * \
-                             abs(field_f) / (abs(field_f)**2 + 1e-3) * Pupil_alpha).copy()
+                        self.Pupil_obj = (self.Pupil_obj - grad_Pupil/max(af.arith.abs(field_f)) * \
+                             af.arith.abs(field_f) / (af.arith.pow(af.arith.abs(field_f),2) + 1e-3) * Pupil_alpha).copy()
 
                     # shift estimate
                     if update_shift ==1:
-                        Ip_shift_fx = ifft2(fft2(self.field_p_whole) * (1j*2*np.pi*self.fxxp) * \
-                                           np.exp(1j*2*np.pi*self.ps*(self.fxxp * self.xshift[m,j] + self.fyyp * self.yshift[m,j])))
-                        Ip_shift_fy = ifft2(fft2(self.field_p_whole) * (1j*2*np.pi*self.fyyp) * \
-                                           np.exp(1j*2*np.pi*self.ps*(self.fxxp * self.xshift[m,j] + self.fyyp * self.yshift[m,j])))
+                        Ip_shift_fx = iF(F(self.field_p_whole) * (1j*2*np.pi*self.fxxp) * \
+                                           af.arith.exp(1j*2*np.pi*self.ps*(self.fxxp * self.xshift[m,j] + self.fyyp * self.yshift[m,j])))
+                        Ip_shift_fy = iF(F(self.field_p_whole) * (1j*2*np.pi*self.fyyp) * \
+                                           af.arith.exp(1j*2*np.pi*self.ps*(self.fxxp * self.xshift[m,j] + self.fyyp * self.yshift[m,j])))
                         Ip_shift_fx = Ip_shift_fx[self.yshift_max:self.yshift_max+self.Nc,\
                                                   self.xshift_max:self.xshift_max+self.Mc]
                         Ip_shift_fy = Ip_shift_fy[self.yshift_max:self.yshift_max+self.Nc,\
                                                   self.xshift_max:self.xshift_max+self.Mc]
 
-                        grad_xshift = -np.real(np.sum(np.conj(field_temp) * self.obj * Ip_shift_fx))
-                        grad_yshift = -np.real(np.sum(np.conj(field_temp) * self.obj * Ip_shift_fy))
+                        grad_xshift = -af.arith.real(sum(af.arith.conjg(field_temp) * self.obj * Ip_shift_fx))
+                        grad_yshift = -af.arith.real(sum(af.arith.conjg(field_temp) * self.obj * Ip_shift_fy))
 
-                        self.xshift[m,j] = (self.xshift[m,j] - grad_xshift\
-                                            /self.N/self.M/(np.max(np.abs(self.obj))**2) * shift_alpha).copy()
-                        self.yshift[m,j] = (self.yshift[m,j] - grad_yshift\
-                                            /self.N/self.M/(np.max(np.abs(self.obj))**2) * shift_alpha).copy()
+                        self.xshift[m,j] = (self.xshift[m,j] - np.array(grad_xshift\
+                                            /self.N/self.M/(max(af.arith.abs(self.obj))**2)) * shift_alpha).copy()
+                        self.yshift[m,j] = (self.yshift[m,j] - np.array(grad_yshift\
+                                            /self.N/self.M/(max(af.arith.abs(self.obj))**2)) * shift_alpha).copy()
 
-                    self.err[i+1] += np.sum(np.abs(I_sqrt_diff)**2)
+                    self.err[i+1] += np.array(sum(af.arith.abs(I_sqrt_diff)**2))
 
-            self.obj = ifft2(fft2(self.obj) * self.Gaussian)
-            self.field_p_whole = ifft2(fft2(self.field_p_whole) * self.Pattern_support)
+            self.obj = (iF(F(self.obj) * self.Gaussian)).copy()
+            self.field_p_whole = (iF(F(self.field_p_whole) * self.Pattern_support)).copy()
             
             if update_Pupil==1:
-                Pupil_angle = np.angle(self.Pupil_obj)
-                Pupil_angle = (Pupil_angle - np.sum(Pupil_angle*self.zerpoly[1])/np.sum(self.zerpoly[1]**2)\
-                *self.zerpoly[1] - np.sum(Pupil_angle*self.zerpoly[2])/np.sum(self.zerpoly[2]**2)\
-                *self.zerpoly[2]).copy()
-                self.Pupil_obj = np.abs(self.Pupil_obj) * np.exp(1j*Pupil_angle)
+                Pupil_angle = angle(self.Pupil_obj)
+                zerpoly_1 = reshape(self.zerpoly[1],(self.zerpoly.shape[1],self.zerpoly.shape[2]))
+                zerpoly_2 = reshape(self.zerpoly[2],(self.zerpoly.shape[1],self.zerpoly.shape[2]))
+                
+                Pupil_angle = (Pupil_angle - np.array(sum(Pupil_angle*zerpoly_1)/sum(af.arith.pow(zerpoly_1,2)))[0]\
+                *zerpoly_1 - np.array(sum(Pupil_angle*zerpoly_2)/sum(af.arith.pow(zerpoly_2,2)))[0]\
+                *zerpoly_2).copy()
+                self.Pupil_obj = (af.arith.abs(self.Pupil_obj) * af.arith.exp(1j*Pupil_angle)).copy()
                 
 
             if np.mod(i,1) == 0:
@@ -242,9 +283,9 @@ class cSIM_solver:
                     ax[0,1].cla()
                     ax[1,0].cla()
                     ax[1,1].cla()
-                ax[0,0].imshow(np.angle(self.obj),cmap='gray');
-                ax[0,1].imshow(np.abs(self.field_p_whole)**2,cmap='gray')
-                ax[1,0].imshow(fftshift(np.angle(self.Pupil_obj)))
+                ax[0,0].imshow(angle(self.obj),cmap='gray');
+                ax[0,1].imshow(af.arith.pow(af.arith.abs(self.field_p_whole),2),cmap='gray')
+                ax[1,0].imshow(fftshift(np.array(angle(self.Pupil_obj))))
                 ax[1,1].plot(self.xshift[0],self.yshift[0],'w')
                 ax[1,1].plot(self.xshift[1],self.yshift[1],'y')
                 display.display(f1)
