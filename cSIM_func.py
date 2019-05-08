@@ -1,7 +1,7 @@
 import numpy as np
 import matplotlib.pyplot as plt
 
-from numpy.fft import fft2, ifft2, fftshift, ifftshift
+from numpy.fft import fft, ifft, fft2, ifft2, fftshift, ifftshift
 
 from IPython import display
 import time
@@ -59,6 +59,67 @@ def image_registration(img_stack,usfac, img_up):
                 xshift[j,i] = output[1] * img_up
             
     return xshift, yshift
+
+
+def rotate(obj, theta):
+    Ncrop, Mcrop = obj.shape
+    obj = np.pad(obj, ((Ncrop//2,),(Mcrop//2,)), mode='constant')
+    N,M = obj.shape
+
+    x = np.r_[0:M]-M//2
+    y = np.r_[0:N]-N//2
+
+    fx = ifftshift(x/M)
+    fy = ifftshift(y/N)
+    
+    
+    
+    if abs(theta) <= np.pi/2:
+    
+        alpha = -np.tan(theta/2)
+        beta = np.sin(theta)
+        gamma = -np.tan(theta/2)
+
+        obj_rot = ifft(fft(obj,axis=0)*np.exp(-1j*2*np.pi*alpha*fy.reshape(N,1).dot(x.reshape(1,M))),axis=0)
+        obj_rot = ifft(fft(obj_rot,axis=1)*np.exp(-1j*2*np.pi*beta*y.reshape(N,1).dot(fx.reshape(1,M))),axis=1)
+        obj_rot = ifft(fft(obj_rot,axis=0)*np.exp(-1j*2*np.pi*gamma*fy.reshape(N,1).dot(x.reshape(1,M))),axis=0)
+    elif theta >0: 
+
+        alpha = -np.tan((np.pi/2)/2)
+        beta = np.sin(np.pi/2)
+        gamma = -np.tan((np.pi/2)/2)
+
+        obj_rot = ifft(fft(obj,axis=0)*np.exp(-1j*2*np.pi*alpha*fy.reshape(N,1).dot(x.reshape(1,M))),axis=0)
+        obj_rot = ifft(fft(obj_rot,axis=1)*np.exp(-1j*2*np.pi*beta*y.reshape(N,1).dot(fx.reshape(1,M))),axis=1)
+        obj_rot = ifft(fft(obj_rot,axis=0)*np.exp(-1j*2*np.pi*gamma*fy.reshape(N,1).dot(x.reshape(1,M))),axis=0)
+
+        alpha = -np.tan((theta-np.pi/2)/2)
+        beta = np.sin(theta-np.pi/2)
+        gamma = -np.tan((theta-np.pi/2)/2)
+
+        obj_rot = ifft(fft(obj_rot,axis=0)*np.exp(-1j*2*np.pi*alpha*fy.reshape(N,1).dot(x.reshape(1,M))),axis=0)
+        obj_rot = ifft(fft(obj_rot,axis=1)*np.exp(-1j*2*np.pi*beta*y.reshape(N,1).dot(fx.reshape(1,M))),axis=1)
+        obj_rot = ifft(fft(obj_rot,axis=0)*np.exp(-1j*2*np.pi*gamma*fy.reshape(N,1).dot(x.reshape(1,M))),axis=0)
+    else: 
+
+        alpha = -np.tan(-(np.pi/2)/2)
+        beta = np.sin(-np.pi/2)
+        gamma = -np.tan(-(np.pi/2)/2)
+
+        obj_rot = ifft(fft(obj,axis=0)*np.exp(-1j*2*np.pi*alpha*fy.reshape(N,1).dot(x.reshape(1,M))),axis=0)
+        obj_rot = ifft(fft(obj_rot,axis=1)*np.exp(-1j*2*np.pi*beta*y.reshape(N,1).dot(fx.reshape(1,M))),axis=1)
+        obj_rot = ifft(fft(obj_rot,axis=0)*np.exp(-1j*2*np.pi*gamma*fy.reshape(N,1).dot(x.reshape(1,M))),axis=0)
+
+        alpha = -np.tan((theta+np.pi/2)/2)
+        beta = np.sin(theta+np.pi/2)
+        gamma = -np.tan((theta+np.pi/2)/2)
+
+        obj_rot = ifft(fft(obj_rot,axis=0)*np.exp(-1j*2*np.pi*alpha*fy.reshape(N,1).dot(x.reshape(1,M))),axis=0)
+        obj_rot = ifft(fft(obj_rot,axis=1)*np.exp(-1j*2*np.pi*beta*y.reshape(N,1).dot(fx.reshape(1,M))),axis=1)
+        obj_rot = ifft(fft(obj_rot,axis=0)*np.exp(-1j*2*np.pi*gamma*fy.reshape(N,1).dot(x.reshape(1,M))),axis=0)
+
+
+    return obj_rot[N//2-Ncrop//2:N//2+Ncrop//2,M//2-Mcrop//2:M//2+Mcrop//2]
 
 
 class cSIM_solver:

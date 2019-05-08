@@ -77,6 +77,76 @@ def af_pad(image, NN, MM, val):
     return image_pad
 
 
+def rotate(obj, theta):
+    
+    Ncrop, Mcrop = obj.shape
+    obj = af.interop.np_to_af_array(np.pad(obj, ((Ncrop//2,),(Mcrop//2,)), mode='constant'))
+    N,M = obj.shape
+
+    x = np.r_[0:M]-M//2
+    y = np.r_[0:N]-N//2
+
+    fx = ifftshift(x/M)
+    fy = ifftshift(y/N)
+
+    fy_dot_x = af.interop.np_to_af_array(fy.reshape(N,1).dot(x.reshape(1,M)))
+    y_dot_fx = af.reorder(af.interop.np_to_af_array(y.reshape(N,1).dot(fx.reshape(1,M))),1,0)
+
+
+
+    if abs(theta) <= np.pi/2:
+
+        alpha = -np.tan(theta/2)
+        beta = np.sin(theta)
+        gamma = -np.tan(theta/2)
+
+
+        obj_rot = af.signal.ifft(af.signal.fft(obj)*af.arith.exp(-1j*2*np.pi*alpha*fy_dot_x))
+        obj_rot = af.reorder(af.signal.ifft(af.signal.fft(af.reorder(obj_rot,1,0))*af.arith.exp(-1j*2*np.pi*beta*y_dot_fx)),1,0)
+        obj_rot = af.signal.ifft(af.signal.fft(obj_rot)*af.arith.exp(-1j*2*np.pi*gamma*fy_dot_x))
+
+    elif theta >0:
+        alpha = -np.tan((np.pi/2)/2)
+        beta = np.sin(np.pi/2)
+        gamma = -np.tan((np.pi/2)/2)
+
+
+        obj_rot = af.signal.ifft(af.signal.fft(obj)*af.arith.exp(-1j*2*np.pi*alpha*fy_dot_x))
+        obj_rot = af.reorder(af.signal.ifft(af.signal.fft(af.reorder(obj_rot,1,0))*af.arith.exp(-1j*2*np.pi*beta*y_dot_fx)),1,0)
+        obj_rot = af.signal.ifft(af.signal.fft(obj_rot)*af.arith.exp(-1j*2*np.pi*gamma*fy_dot_x))
+
+        alpha = -np.tan((theta-np.pi/2)/2)
+        beta = np.sin(theta-np.pi/2)
+        gamma = -np.tan((theta-np.pi/2)/2)
+
+
+        obj_rot = af.signal.ifft(af.signal.fft(obj_rot)*af.arith.exp(-1j*2*np.pi*alpha*fy_dot_x))
+        obj_rot = af.reorder(af.signal.ifft(af.signal.fft(af.reorder(obj_rot,1,0))*af.arith.exp(-1j*2*np.pi*beta*y_dot_fx)),1,0)
+        obj_rot = af.signal.ifft(af.signal.fft(obj_rot)*af.arith.exp(-1j*2*np.pi*gamma*fy_dot_x))
+
+    else:
+
+        alpha = -np.tan(-(np.pi/2)/2)
+        beta = np.sin(-np.pi/2)
+        gamma = -np.tan(-(np.pi/2)/2)
+
+
+        obj_rot = af.signal.ifft(af.signal.fft(obj)*af.arith.exp(-1j*2*np.pi*alpha*fy_dot_x))
+        obj_rot = af.reorder(af.signal.ifft(af.signal.fft(af.reorder(obj_rot,1,0))*af.arith.exp(-1j*2*np.pi*beta*y_dot_fx)),1,0)
+        obj_rot = af.signal.ifft(af.signal.fft(obj_rot)*af.arith.exp(-1j*2*np.pi*gamma*fy_dot_x))
+
+        alpha = -np.tan((theta+np.pi/2)/2)
+        beta = np.sin(theta+np.pi/2)
+        gamma = -np.tan((theta+np.pi/2)/2)
+
+
+        obj_rot = af.signal.ifft(af.signal.fft(obj_rot)*af.arith.exp(-1j*2*np.pi*alpha*fy_dot_x))
+        obj_rot = af.reorder(af.signal.ifft(af.signal.fft(af.reorder(obj_rot,1,0))*af.arith.exp(-1j*2*np.pi*beta*y_dot_fx)),1,0)
+        obj_rot = af.signal.ifft(af.signal.fft(obj_rot)*af.arith.exp(-1j*2*np.pi*gamma*fy_dot_x))
+
+    return np.array(obj_rot)[N//2-Ncrop//2:N//2+Ncrop//2,M//2-Mcrop//2:M//2+Mcrop//2]
+
+
 
 class cSIM_solver:
     
